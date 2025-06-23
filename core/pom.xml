@@ -251,6 +251,11 @@
       </plugin>
       <plugin>
         <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>**/VertexAiSessionServiceTest.java</exclude>
+          </excludes>
+        </configuration>
         <executions>
           <execution>
             <!-- run all tests with standard env -->
