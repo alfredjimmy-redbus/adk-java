@@ -16,6 +16,7 @@
 
 package com.google.adk.models.sarvamai;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.adk.models.BaseLlm;
 import com.google.adk.models.BaseLlmConnection;
@@ -26,6 +27,10 @@ import com.google.genai.types.Part;
 import io.reactivex.rxjava3.core.Flowable;
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MediaType;
@@ -145,14 +150,56 @@ public class SarvamAi extends BaseLlm {
   }
 
   private LlmResponse toLlmResponse(SarvamAiResponse sarvamAiResponse) {
-    Content content =
-        Content.builder()
-            .role("model")
-            .parts(
-                java.util.Collections.singletonList(
-                    Part.fromText(sarvamAiResponse.getChoices().get(0).getMessage().getContent())))
-            .build();
+    SarvamAiResponseMessage message = sarvamAiResponse.getChoices().get(0).getMessage();
+    List<Part> parts = new ArrayList<>();
+
+    if (message != null && message.getToolCalls() != null && !message.getToolCalls().isEmpty()) {
+      for (SarvamAiResponseMessage.ToolCall toolCall : message.getToolCalls()) {
+        if (toolCall == null || toolCall.getFunction() == null) {
+          continue;
+        }
+        String functionName = toolCall.getFunction().getName();
+        if (functionName == null || functionName.isBlank()) {
+          continue;
+        }
+        Map<String, Object> args = parseArguments(toolCall.getFunction().getArguments());
+        parts.add(Part.fromFunctionCall(functionName, args));
+      }
+    }
+
+    if (parts.isEmpty() && message != null && message.getFunctionCall() != null) {
+      SarvamAiResponseMessage.Function functionCall = message.getFunctionCall();
+      if (functionCall.getName() != null && !functionCall.getName().isBlank()) {
+        parts.add(
+            Part.fromFunctionCall(
+                functionCall.getName(), parseArguments(functionCall.getArguments())));
+      }
+    }
+
+    if (message != null
+        && message.getContent() != null
+        && !message.getContent().isBlank()
+        && parts.isEmpty()) {
+      parts.add(Part.fromText(message.getContent()));
+    }
+
+    if (parts.isEmpty()) {
+      parts.add(Part.fromText(""));
+    }
+
+    Content content = Content.builder().role("model").parts(parts).build();
     return LlmResponse.builder().content(content).build();
+  }
+
+  private Map<String, Object> parseArguments(String argumentsJson) {
+    if (argumentsJson == null || argumentsJson.isBlank()) {
+      return Collections.emptyMap();
+    }
+    try {
+      return objectMapper.readValue(argumentsJson, new TypeReference<Map<String, Object>>() {});
+    } catch (Exception ignored) {
+      return Collections.emptyMap();
+    }
   }
 
   @Override
