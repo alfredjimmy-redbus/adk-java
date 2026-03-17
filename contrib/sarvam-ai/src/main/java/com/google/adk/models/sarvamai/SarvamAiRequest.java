@@ -270,7 +270,68 @@ public class SarvamAiRequest {
     if (!schemaMap.containsKey("type")) {
       schemaMap.put("type", "object");
     }
-    return schemaMap;
+    return normalizeSchemaTypesToJsonSchema(schemaMap);
+  }
+
+  /**
+   * Recursively normalizes schema type values to JSON Schema lowercase (e.g. STRING -> string).
+   * Sarvam API expects JSON Schema; ADK/Gemini use uppercase type names.
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> normalizeSchemaTypesToJsonSchema(Map<String, Object> map) {
+    if (map == null || map.isEmpty()) {
+      return map;
+    }
+    Map<String, Object> result = new java.util.LinkedHashMap<>(map);
+    if (result.containsKey("type")) {
+      Object type = result.get("type");
+      String typeStr = null;
+      if (type instanceof String s) {
+        typeStr = s;
+      } else if (type instanceof Map<?, ?> typeMap && typeMap.containsKey("knownEnum")) {
+        typeStr = String.valueOf(typeMap.get("knownEnum"));
+      }
+      if (typeStr != null) {
+        result.put("type", toJsonSchemaType(typeStr));
+      }
+    }
+    if (result.containsKey("properties")) {
+      Object props = result.get("properties");
+      if (props instanceof Map<?, ?> propsMap) {
+        Map<String, Object> normalized = new java.util.LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : propsMap.entrySet()) {
+          if (e.getValue() instanceof Map<?, ?> nested) {
+            normalized.put(
+                String.valueOf(e.getKey()),
+                normalizeSchemaTypesToJsonSchema((Map<String, Object>) nested));
+          } else {
+            normalized.put(String.valueOf(e.getKey()), e.getValue());
+          }
+        }
+        result.put("properties", normalized);
+      }
+    }
+    if (result.containsKey("items")) {
+      Object items = result.get("items");
+      if (items instanceof Map<?, ?> itemsMap) {
+        result.put("items", normalizeSchemaTypesToJsonSchema((Map<String, Object>) itemsMap));
+      }
+    }
+    return result;
+  }
+
+  private static String toJsonSchemaType(String type) {
+    if (type == null) return "string";
+    return switch (type.toUpperCase()) {
+      case "STRING" -> "string";
+      case "NUMBER" -> "number";
+      case "INTEGER" -> "integer";
+      case "BOOLEAN" -> "boolean";
+      case "ARRAY" -> "array";
+      case "OBJECT" -> "object";
+      case "NULL" -> "null";
+      default -> type.toLowerCase();
+    };
   }
 
   private static String toJsonString(Object value, String fallback) {
