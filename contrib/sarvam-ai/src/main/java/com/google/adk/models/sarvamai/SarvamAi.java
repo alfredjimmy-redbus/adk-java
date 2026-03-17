@@ -23,6 +23,7 @@ import com.google.adk.models.BaseLlmConnection;
 import com.google.adk.models.LlmRequest;
 import com.google.adk.models.LlmResponse;
 import com.google.genai.types.Content;
+import com.google.genai.types.FunctionCall;
 import com.google.genai.types.Part;
 import io.reactivex.rxjava3.core.Flowable;
 import java.io.BufferedReader;
@@ -68,16 +69,24 @@ public class SarvamAi extends BaseLlm {
       return Flowable.fromCallable(
           () -> {
             String requestBody =
-                objectMapper.writeValueAsString(new SarvamAiRequest(this.model(), llmRequest));
+                objectMapper.writeValueAsString(
+                    new SarvamAiRequest(this.model(), llmRequest, false));
             Request request =
                 new Request.Builder()
                     .url(API_ENDPOINT)
-                    .addHeader("Authorization", "Bearer " + apiKey)
+                    .addHeader("api-subscription-key", apiKey)
                     .post(RequestBody.create(requestBody, MediaType.get("application/json")))
                     .build();
             Response response = httpClient.newCall(request).execute();
             if (!response.isSuccessful()) {
-              throw new IOException("Unexpected code " + response);
+              String body = response.body() != null ? response.body().string() : "";
+              throw new IOException(
+                  "Sarvam API error "
+                      + response.code()
+                      + ": "
+                      + response.message()
+                      + ". Body: "
+                      + body);
             }
             ResponseBody responseBody = response.body();
             if (responseBody != null) {
@@ -97,11 +106,12 @@ public class SarvamAi extends BaseLlm {
         emitter -> {
           try {
             String requestBody =
-                objectMapper.writeValueAsString(new SarvamAiRequest(this.model(), llmRequest));
+                objectMapper.writeValueAsString(
+                    new SarvamAiRequest(this.model(), llmRequest, true));
             Request request =
                 new Request.Builder()
                     .url(API_ENDPOINT)
-                    .addHeader("Authorization", "Bearer " + apiKey)
+                    .addHeader("api-subscription-key", apiKey)
                     .post(RequestBody.create(requestBody, MediaType.get("application/json")))
                     .build();
             httpClient
@@ -116,7 +126,15 @@ public class SarvamAi extends BaseLlm {
                       @Override
                       public void onResponse(Call call, Response response) throws IOException {
                         if (!response.isSuccessful()) {
-                          emitter.onError(new IOException("Unexpected code " + response));
+                          String body = response.body() != null ? response.body().string() : "";
+                          emitter.onError(
+                              new IOException(
+                                  "Sarvam API error "
+                                      + response.code()
+                                      + ": "
+                                      + response.message()
+                                      + ". Body: "
+                                      + body));
                           return;
                         }
                         ResponseBody responseBody = response.body();
@@ -163,16 +181,35 @@ public class SarvamAi extends BaseLlm {
           continue;
         }
         Map<String, Object> args = parseArguments(toolCall.getFunction().getArguments());
-        parts.add(Part.fromFunctionCall(functionName, args));
+        String toolCallId = toolCall.getId();
+        if (toolCallId == null || toolCallId.isBlank()) {
+          toolCallId = "call_" + System.currentTimeMillis();
+        }
+        String finalToolCallId = toolCallId;
+        FunctionCall fc =
+            FunctionCall.builder()
+                .id(finalToolCallId)
+                .name(functionName)
+                .args(args != null ? args : Collections.emptyMap())
+                .build();
+        parts.add(Part.builder().functionCall(fc).build());
       }
     }
 
     if (parts.isEmpty() && message != null && message.getFunctionCall() != null) {
       SarvamAiResponseMessage.Function functionCall = message.getFunctionCall();
       if (functionCall.getName() != null && !functionCall.getName().isBlank()) {
-        parts.add(
-            Part.fromFunctionCall(
-                functionCall.getName(), parseArguments(functionCall.getArguments())));
+        String toolCallId = "call_" + System.currentTimeMillis();
+        FunctionCall fc =
+            FunctionCall.builder()
+                .id(toolCallId)
+                .name(functionCall.getName())
+                .args(
+                    parseArguments(functionCall.getArguments()) != null
+                        ? parseArguments(functionCall.getArguments())
+                        : Collections.emptyMap())
+                .build();
+        parts.add(Part.builder().functionCall(fc).build());
       }
     }
 

@@ -26,6 +26,7 @@ import com.google.adk.tools.BaseTool;
 import com.google.common.collect.ImmutableMap;
 import com.google.genai.types.Content;
 import com.google.genai.types.FunctionDeclaration;
+import com.google.genai.types.GenerateContentConfig;
 import com.google.genai.types.Part;
 import com.google.genai.types.Schema;
 import java.util.ArrayList;
@@ -49,19 +50,56 @@ public class SarvamAiRequest {
   @JsonInclude(JsonInclude.Include.NON_EMPTY)
   private List<ToolDefinition> tools;
 
-  @JsonInclude(JsonInclude.Include.NON_EMPTY)
-  private List<FunctionDefinition> functions;
-
   @JsonProperty("tool_choice")
   @JsonInclude(JsonInclude.Include.NON_NULL)
-  private String toolChoice;
+  private Object toolChoice;
 
-  @JsonProperty("function_call")
   @JsonInclude(JsonInclude.Include.NON_NULL)
-  private String functionCall;
+  private Double temperature;
+
+  @JsonProperty("top_p")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Double topP;
+
+  @JsonProperty("max_tokens")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Integer maxTokens;
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Object stop;
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Integer n;
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Integer seed;
+
+  @JsonProperty("frequency_penalty")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Double frequencyPenalty;
+
+  @JsonProperty("presence_penalty")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Double presencePenalty;
+
+  @JsonProperty("reasoning_effort")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private String reasoningEffort;
+
+  @JsonProperty("wiki_grounding")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Boolean wikiGrounding;
+
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  private Boolean stream;
 
   public SarvamAiRequest(String model, LlmRequest llmRequest) {
+    this(model, llmRequest, false);
+  }
+
+  public SarvamAiRequest(String model, LlmRequest llmRequest, boolean stream) {
     this.model = model;
+    this.stream = stream;
     this.messages = new ArrayList<>();
     List<String> systemInstructions = llmRequest.getSystemInstructions();
     if (!systemInstructions.isEmpty()) {
@@ -94,22 +132,44 @@ public class SarvamAiRequest {
           var functionResponse = part.functionResponse().get();
           String responseBody =
               toJsonString(functionResponse.response().orElse(ImmutableMap.of()), "{}");
+          // tool_call_id is required - generate if missing for tool loop matching
+          String toolCallId =
+              functionResponse
+                  .id()
+                  .filter(id -> !id.isBlank())
+                  .orElse("call_" + System.currentTimeMillis());
+          // Tool messages: only role, content, tool_call_id (pass null for name, toolCalls,
+          // functionCall)
           this.messages.add(
-              new SarvamAiMessage(
-                  "tool",
-                  responseBody,
-                  functionResponse.id().orElse(null),
-                  functionResponse.name().orElse(null),
-                  null,
-                  null));
+              new SarvamAiMessage("tool", responseBody, toolCallId, null, null, null));
         }
       }
     }
 
     this.tools = buildToolDefinitions(llmRequest.tools());
-    this.functions = this.tools.stream().map(ToolDefinition::getFunction).toList();
     this.toolChoice = this.tools.isEmpty() ? null : "auto";
-    this.functionCall = this.functions.isEmpty() ? null : "auto";
+
+    // Map config from LlmRequest.config() (GenerateContentConfig)
+    Optional<GenerateContentConfig> configOpt = llmRequest.config();
+    if (configOpt.isPresent()) {
+      GenerateContentConfig config = configOpt.get();
+      config.temperature().ifPresent(t -> this.temperature = t.doubleValue());
+      config.topP().ifPresent(t -> this.topP = t.doubleValue());
+      config.maxOutputTokens().ifPresent(this::setMaxTokens);
+      config
+          .stopSequences()
+          .filter(s -> !s.isEmpty())
+          .ifPresent(
+              stopSeq -> {
+                if (stopSeq.size() == 1) {
+                  this.stop = stopSeq.get(0);
+                } else {
+                  this.stop = stopSeq;
+                }
+              });
+      config.frequencyPenalty().ifPresent(f -> this.frequencyPenalty = f.doubleValue());
+      config.presencePenalty().ifPresent(p -> this.presencePenalty = p.doubleValue());
+    }
   }
 
   public String getModel() {
@@ -124,16 +184,56 @@ public class SarvamAiRequest {
     return tools;
   }
 
-  public String getToolChoice() {
+  public Object getToolChoice() {
     return toolChoice;
   }
 
-  public List<FunctionDefinition> getFunctions() {
-    return functions;
+  public Double getTemperature() {
+    return temperature;
   }
 
-  public String getFunctionCall() {
-    return functionCall;
+  public Double getTopP() {
+    return topP;
+  }
+
+  public Integer getMaxTokens() {
+    return maxTokens;
+  }
+
+  public void setMaxTokens(Integer maxTokens) {
+    this.maxTokens = maxTokens;
+  }
+
+  public Object getStop() {
+    return stop;
+  }
+
+  public Integer getN() {
+    return n;
+  }
+
+  public Integer getSeed() {
+    return seed;
+  }
+
+  public Double getFrequencyPenalty() {
+    return frequencyPenalty;
+  }
+
+  public Double getPresencePenalty() {
+    return presencePenalty;
+  }
+
+  public String getReasoningEffort() {
+    return reasoningEffort;
+  }
+
+  public Boolean getWikiGrounding() {
+    return wikiGrounding;
+  }
+
+  public Boolean getStream() {
+    return stream;
   }
 
   private static List<ToolDefinition> buildToolDefinitions(Map<String, BaseTool> tools) {
