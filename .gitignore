@@ -37,5 +37,3 @@ plans/
 # Sample build artifacts / local scratch
 contrib/samples/**/bin/
 mkpro_logs.db
-
-
