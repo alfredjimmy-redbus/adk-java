@@ -27,6 +27,7 @@ import com.google.adk.agents.LlmAgent;
 import com.google.adk.agents.RunConfig;
 import com.google.adk.agents.SequentialAgent;
 import com.google.adk.apps.App;
+import com.google.adk.apps.InactivityNudgeConfig;
 import com.google.adk.apps.ResumabilityConfig;
 import com.google.adk.artifacts.BaseArtifactService;
 import com.google.adk.artifacts.InMemoryArtifactService;
@@ -63,7 +64,10 @@ import io.opentelemetry.context.Context;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.core.Single;
+import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
 import io.reactivex.rxjava3.subjects.CompletableSubject;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -87,6 +91,7 @@ public class Runner {
   @Nullable private final EventsCompactionConfig eventsCompactionConfig;
   @Nullable private final ContextCacheConfig contextCacheConfig;
   private final @Nullable ResumabilityConfig resumabilityConfig;
+  private final InactivityNudgeConfig inactivityNudgeConfig;
   private final ConcurrentMap<String, Completable> activeSessionCompletables =
       new MapMaker().weakValues().makeMap();
 
@@ -99,6 +104,7 @@ public class Runner {
     private BaseSessionService sessionService = new InMemorySessionService();
     @Nullable private BaseMemoryService memoryService = null;
     private List<? extends Plugin> plugins = ImmutableList.of();
+    private List<? extends Plugin> additionalPlugins = ImmutableList.of();
 
     @CanIgnoreReturnValue
     public Builder app(App app) {
@@ -153,6 +159,20 @@ public class Runner {
       return this;
     }
 
+    /** Adds plugins to those already configured by an {@link App}. */
+    @CanIgnoreReturnValue
+    public Builder additionalPlugins(List<? extends Plugin> additionalPlugins) {
+      this.additionalPlugins = ImmutableList.copyOf(additionalPlugins);
+      return this;
+    }
+
+    /** Adds plugins to those already configured by an {@link App}. */
+    @CanIgnoreReturnValue
+    public Builder additionalPlugins(Plugin... additionalPlugins) {
+      this.additionalPlugins = ImmutableList.copyOf(additionalPlugins);
+      return this;
+    }
+
     public Runner build() {
       BaseAgent buildAgent;
       String buildAppName;
@@ -160,6 +180,7 @@ public class Runner {
       EventsCompactionConfig buildEventsCompactionConfig;
       ContextCacheConfig buildContextCacheConfig;
       ResumabilityConfig buildResumabilityConfig;
+      InactivityNudgeConfig buildInactivityNudgeConfig;
 
       if (this.app != null) {
         if (this.agent != null) {
@@ -169,18 +190,28 @@ public class Runner {
           throw new IllegalStateException("plugins() cannot be called when app() is called.");
         }
         buildAgent = this.app.rootAgent();
-        buildPlugins = this.app.plugins();
+        buildPlugins =
+            ImmutableList.<Plugin>builder()
+                .addAll(this.app.plugins())
+                .addAll(this.additionalPlugins)
+                .build();
         buildAppName = this.appName == null ? this.app.name() : this.appName;
         buildEventsCompactionConfig = this.app.eventsCompactionConfig();
         buildContextCacheConfig = this.app.contextCacheConfig();
         buildResumabilityConfig = this.app.resumabilityConfig();
+        buildInactivityNudgeConfig = this.app.inactivityNudgeConfig();
       } else {
         buildAgent = this.agent;
         buildAppName = this.appName;
-        buildPlugins = this.plugins;
+        buildPlugins =
+            ImmutableList.<Plugin>builder()
+                .addAll(this.plugins)
+                .addAll(this.additionalPlugins)
+                .build();
         buildEventsCompactionConfig = null;
         buildContextCacheConfig = null;
         buildResumabilityConfig = null;
+        buildInactivityNudgeConfig = InactivityNudgeConfig.disabled();
       }
 
       if (buildAgent == null) {
@@ -204,7 +235,8 @@ public class Runner {
           buildPlugins,
           buildEventsCompactionConfig,
           buildContextCacheConfig,
-          buildResumabilityConfig);
+          buildResumabilityConfig,
+          buildInactivityNudgeConfig);
     }
   }
 
@@ -286,6 +318,30 @@ public class Runner {
       @Nullable EventsCompactionConfig eventsCompactionConfig,
       @Nullable ContextCacheConfig contextCacheConfig,
       @Nullable ResumabilityConfig resumabilityConfig) {
+    this(
+        agent,
+        appName,
+        artifactService,
+        sessionService,
+        memoryService,
+        plugins,
+        eventsCompactionConfig,
+        contextCacheConfig,
+        resumabilityConfig,
+        InactivityNudgeConfig.disabled());
+  }
+
+  private Runner(
+      BaseAgent agent,
+      String appName,
+      BaseArtifactService artifactService,
+      BaseSessionService sessionService,
+      @Nullable BaseMemoryService memoryService,
+      List<? extends Plugin> plugins,
+      @Nullable EventsCompactionConfig eventsCompactionConfig,
+      @Nullable ContextCacheConfig contextCacheConfig,
+      @Nullable ResumabilityConfig resumabilityConfig,
+      InactivityNudgeConfig inactivityNudgeConfig) {
     this.agent = agent;
     this.appName = appName;
     this.artifactService = artifactService;
@@ -295,6 +351,7 @@ public class Runner {
     this.eventsCompactionConfig = createEventsCompactionConfig(agent, eventsCompactionConfig);
     this.contextCacheConfig = contextCacheConfig;
     this.resumabilityConfig = resumabilityConfig;
+    this.inactivityNudgeConfig = inactivityNudgeConfig;
   }
 
   /**
@@ -334,6 +391,11 @@ public class Runner {
 
   public PluginManager pluginManager() {
     return this.pluginManager;
+  }
+
+  /** Returns the application-wide inactivity nudge policy. */
+  public InactivityNudgeConfig inactivityNudgeConfig() {
+    return this.inactivityNudgeConfig;
   }
 
   /** Closes all plugins, code executors, and releases any resources. */
@@ -778,6 +840,9 @@ public class Runner {
       Session session, @Nullable LiveRequestQueue liveRequestQueue, RunConfig runConfig) {
     return Flowable.defer(
         () -> {
+          Disposable inactivityNudgeWatcher =
+              scheduleInactivityNudge(
+                  session, liveRequestQueue, inactivityNudgeConfig, Schedulers.computation());
           Context capturedContext = Context.current();
           InvocationContext invocationContext =
               newInvocationContextForLive(session, liveRequestQueue, runConfig);
@@ -801,6 +866,12 @@ public class Runner {
                       updatedInvocationContext
                           .agent()
                           .runLive(updatedInvocationContext)
+                          .doOnNext(
+                              event -> {
+                                if (liveRequestQueue != null) {
+                                  liveRequestQueue.recordAssistantActivity();
+                                }
+                              })
                           .concatMapSingle(
                               event ->
                                   this.sessionService
@@ -830,8 +901,38 @@ public class Runner {
                         .onErrorComplete()
                         .subscribe();
                   })
-              .compose(Tracing.<Event>withContext(capturedContext));
+              .compose(Tracing.<Event>withContext(capturedContext))
+              .doFinally(inactivityNudgeWatcher::dispose);
         });
+  }
+
+  static Disposable scheduleInactivityNudge(
+      Session session,
+      @Nullable LiveRequestQueue liveRequestQueue,
+      InactivityNudgeConfig config,
+      Scheduler scheduler) {
+    if (!config.enabled() || liveRequestQueue == null) {
+      return Disposable.disposed();
+    }
+
+    return liveRequestQueue.watchForInactivity(
+        config.inactivityTimeout(), scheduler, () -> buildInactivityNudgeContent(session, config));
+  }
+
+  private static Content buildInactivityNudgeContent(
+      Session session, InactivityNudgeConfig config) {
+    Object configuredLocale = session.state().get(config.localeStateKey());
+    String locale = configuredLocale == null ? config.defaultLocale() : configuredLocale.toString();
+    String message = config.messageForLocale(locale);
+    return Content.builder()
+        .role("user")
+        .parts(
+            ImmutableList.of(
+                Part.fromText(
+                    "The user has been inactive. Check whether they are still there. Respond with"
+                        + " exactly this message and nothing else: "
+                        + message)))
+        .build();
   }
 
   /**
